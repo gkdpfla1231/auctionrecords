@@ -261,6 +261,7 @@ td{padding:8px 11px;vertical-align:middle;line-height:1.4;}
     </div>
     <button class="nav-csv-btn" onclick="openCsv()" title="Import CSV or Excel">⬆ Import</button>
     <button class="nav-csv-btn" onclick="downloadData()" title="Download all records as CSV">⬇ Export</button>
+    <button class="nav-csv-btn" onclick="clearAllData()" title="Clear all records" style="border-color:#8b1a1a;color:#8b1a1a;">🗑 Clear All</button>
     <button class="nav-add-btn" onclick="openAdd()">+ Add Record</button>
   </div>
 </nav>
@@ -491,7 +492,7 @@ window.openDetail=function(id){
 window.deleteRecord=function(id){
   if(!confirm('Delete this record? This cannot be undone.'))return;
   records=records.filter(r=>r.id!==id);
-  closeModal('detail-modal');render();
+  saveToStorage();closeModal('detail-modal');render();
 };
 window.handleImgFile=function(input){
   const file=input.files[0];if(!file)return;
@@ -639,7 +640,7 @@ window.importCsvData=function(){
     });
     added++;
   });
-  closeModal('csv-modal');
+  saveToStorage();closeModal('csv-modal');
   render();
   setTimeout(()=>alert(`✓ Imported ${added} records!`),200);
 };
@@ -686,7 +687,7 @@ window.saveRecord=function(){
   } else {
     records.unshift({id:nextId++,...data});
   }
-  closeModal('add-modal');render();
+  saveToStorage();closeModal('add-modal');render();
 };
 
 // ── URL PARSER (free, no API key) ──────────────────────────────
@@ -853,8 +854,24 @@ let activeYear='all', nextId, records;
 
 const SAMPLE=[];
 
-// Initialize records from SAMPLE
-records=[...SAMPLE]; nextId=records.length+1;
+// Initialize records from localStorage or SAMPLE
+function loadFromStorage(){
+  try{
+    const saved=localStorage.getItem('auctionRecords');
+    if(saved){
+      records=JSON.parse(saved);
+      nextId=records.length?Math.max(...records.map(r=>r.id))+1:1;
+      return;
+    }
+  }catch(e){console.warn('Storage load failed',e);}
+  records=[...SAMPLE];
+  nextId=1;
+}
+function saveToStorage(){
+  try{localStorage.setItem('auctionRecords',JSON.stringify(records));}
+  catch(e){console.warn('Storage save failed',e);}
+}
+loadFromStorage();
 
 async function loadRates(){
   try{
@@ -1041,6 +1058,10 @@ function fmtDateLabel(d){
 
 function buildAnalytics(name){} // stub - analytics not in records-only version
 
+window.clearAllData=function(){
+  if(!confirm('Delete ALL records? This cannot be undone.'))return;
+  records=[];nextId=1;saveToStorage();render();
+};
 window.downloadData=function(){
   if(!records.length){alert('No records to export.');return;}
   const headers=['lot','artist','title','year','medium','size','estLow','estHigh','hammer','currency','house','sale','date','img'];
