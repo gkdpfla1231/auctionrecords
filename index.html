@@ -261,6 +261,7 @@ td{padding:8px 11px;vertical-align:middle;line-height:1.4;}
     </div>
     <button class="nav-csv-btn" onclick="openCsv()" title="Import CSV or Excel">⬆ Import</button>
     <button class="nav-csv-btn" onclick="downloadData()" title="Download all records as CSV">⬇ Export</button>
+    <span id="save-indicator" style="font-family:'DM Mono',monospace;font-size:8px;color:#5aad6a;letter-spacing:0.08em;opacity:0;transition:opacity 0.5s;"></span>
     <button class="nav-csv-btn" onclick="clearAllData()" title="Clear all records" style="border-color:#8b1a1a;color:#8b1a1a;">🗑 Clear All</button>
     <button class="nav-add-btn" onclick="openAdd()">+ Add Record</button>
   </div>
@@ -492,7 +493,7 @@ window.openDetail=function(id){
 window.deleteRecord=function(id){
   if(!confirm('Delete this record? This cannot be undone.'))return;
   records=records.filter(r=>r.id!==id);
-  saveToStorage();closeModal('detail-modal');render();
+  saveToStorage(null,'delete',id);closeModal('detail-modal');render();
 };
 window.handleImgFile=function(input){
   const file=input.files[0];if(!file)return;
@@ -640,9 +641,10 @@ window.importCsvData=function(){
     });
     added++;
   });
-  saveToStorage();closeModal('csv-modal');
-  render();
-  setTimeout(()=>alert(`✓ Imported ${added} records!`),200);
+  closeModal('csv-modal');render();
+  // Bulk save new records to Supabase
+  const newRecords=records.slice(0,added);
+  saveAllToSupabase(newRecords).then(()=>setTimeout(()=>alert(`✓ Imported ${added} records!`),200));
 };
 
 window.downloadTemplate=function(){
@@ -683,11 +685,15 @@ window.saveRecord=function(){
   if(editingId){
     const idx=records.findIndex(r=>r.id===editingId);
     if(idx>-1)records[idx]={...records[idx],...data};
+    const savedId=editingId;
     editingId=null;
+    saveToStorage(records.find(r=>r.id===savedId),'update',savedId);
   } else {
-    records.unshift({id:nextId++,...data});
+    const newRec={id:nextId++,...data};
+    records.unshift(newRec);
+    saveToStorage(newRec,'insert',null);
   }
-  saveToStorage();closeModal('add-modal');render();
+  closeModal('add-modal');render();
 };
 
 // ── URL PARSER (free, no API key) ──────────────────────────────
@@ -853,25 +859,116 @@ let curView='orig', FX={};
 let activeYear='all', nextId, records;
 
 const SAMPLE=[];
+const SB_URL="https://fdoodnopzdsdcxcmrsmw.supabase.co";
+const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZkb29kbm9wemRzZGN4Y21yc213Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3OTcyMDksImV4cCI6MjA4ODM3MzIwOX0.iHK6M4j1BzazNUlAACU1YzqBxbuPdNR8X0yk2NKIseY";
+const SB_HEADERS={"apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Content-Type":"application/json","Prefer":"return=representation"};
 
-// Initialize records from localStorage or SAMPLE
-function loadFromStorage(){
+function flashSaved(ok){
+  const ind=document.getElementById('save-indicator');
+  if(!ind)return;
+  ind.textContent=ok?'✓ saved':'⚠ save failed';
+  ind.style.color=ok?'#5aad6a':'#e06060';
+  ind.style.opacity='1';
+  setTimeout(()=>ind.style.opacity='0',2000);
+}
+
+function recordToRow(r){
+  return {
+    lot:r.lot,artist:r.artist,title:r.title,year:r.year,
+    medium:r.medium,size:r.size,est_low:r.estLow,est_high:r.estHigh,
+    hammer:r.hammer,currency:r.currency,house:r.house,sale:r.sale,
+    date:r.date,img:(r.img&&r.img.startsWith('data:'))?null:r.img
+  };
+}
+function rowToRecord(r){
+  return {
+    id:r.id,lot:r.lot,artist:r.artist,title:r.title,year:r.year,
+    medium:r.medium,size:r.size,estLow:r.est_low,estHigh:r.est_high,
+    hammer:r.hammer,currency:r.currency,house:r.house,sale:r.sale,
+    date:r.date,img:r.img
+  };
+}
+
+async function loadFromSupabase(){
+  try{
+    const res=await fetch(SB_URL+'/rest/v1/auction_records?select=*&order=date.desc,id.desc',{headers:SB_HEADERS});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    const data=await res.json();
+    records=data.map(rowToRecord);
+    nextId=records.length?Math.max(...records.map(r=>r.id))+1:1;
+    render();
+    // Migrate localStorage data to Supabase (one-time)
+    migrateFromLocalStorage();
+  }catch(e){
+    console.warn('Supabase load failed, using localStorage:',e.message);
+    loadFromLocalStorage();
+    render();
+  }
+}
+
+async function migrateFromLocalStorage(){
   try{
     const saved=localStorage.getItem('auctionRecords');
-    if(saved){
-      records=JSON.parse(saved);
-      nextId=records.length?Math.max(...records.map(r=>r.id))+1:1;
-      return;
+    if(!saved)return;
+    const local=JSON.parse(saved);
+    if(!local||!local.length)return;
+    // Only migrate if Supabase is empty
+    if(records.length>0){ localStorage.removeItem('auctionRecords'); return; }
+    console.log('Migrating',local.length,'records from localStorage to Supabase...');
+    const rows=local.map(recordToRow);
+    const res=await fetch(SB_URL+'/rest/v1/auction_records',{
+      method:'POST',
+      headers:{...SB_HEADERS,'Prefer':'return=minimal'},
+      body:JSON.stringify(rows)
+    });
+    if(res.ok){
+      localStorage.removeItem('auctionRecords');
+      console.log('Migration complete!');
+      await loadFromSupabase();
     }
-  }catch(e){console.warn('Storage load failed',e);}
-  records=[...SAMPLE];
-  nextId=1;
+  }catch(e){console.warn('Migration failed:',e);}
 }
-function saveToStorage(){
-  try{localStorage.setItem('auctionRecords',JSON.stringify(records));}
-  catch(e){console.warn('Storage save failed',e);}
+
+function loadFromLocalStorage(){
+  try{
+    const saved=localStorage.getItem('auctionRecords');
+    if(saved){records=JSON.parse(saved);nextId=records.length?Math.max(...records.map(r=>r.id))+1:1;return;}
+  }catch(e){}
+  records=[...SAMPLE];nextId=1;
 }
-loadFromStorage();
+
+async function saveToStorage(record,action,id){
+  try{
+    let res;
+    if(action==='insert'){
+      res=await fetch(SB_URL+'/rest/v1/auction_records',{method:'POST',headers:SB_HEADERS,body:JSON.stringify(recordToRow(record))});
+      if(res.ok){
+        const saved=await res.json();
+        if(saved&&saved[0]){const idx=records.findIndex(r=>r.id===record.id);if(idx>-1)records[idx].id=saved[0].id;nextId=Math.max(...records.map(r=>r.id))+1;render();}
+      }
+    }else if(action==='update'){
+      res=await fetch(SB_URL+'/rest/v1/auction_records?id=eq.'+id,{method:'PATCH',headers:SB_HEADERS,body:JSON.stringify(recordToRow(record))});
+    }else if(action==='delete'){
+      res=await fetch(SB_URL+'/rest/v1/auction_records?id=eq.'+id,{method:'DELETE',headers:SB_HEADERS});
+    }
+    flashSaved(res&&res.ok);
+  }catch(e){console.warn('Save failed:',e);flashSaved(false);}
+}
+
+async function saveAllToSupabase(rows){
+  try{
+    const res=await fetch(SB_URL+'/rest/v1/auction_records',{
+      method:'POST',
+      headers:{...SB_HEADERS,'Prefer':'return=minimal'},
+      body:JSON.stringify(rows.map(recordToRow))
+    });
+    flashSaved(res.ok);
+    if(res.ok)await loadFromSupabase();
+  }catch(e){console.warn('Bulk insert failed:',e);flashSaved(false);}
+}
+
+records=[...SAMPLE];nextId=1;
+loadFromSupabase();
 
 async function loadRates(){
   try{
@@ -1058,9 +1155,12 @@ function fmtDateLabel(d){
 
 function buildAnalytics(name){} // stub - analytics not in records-only version
 
-window.clearAllData=function(){
+window.clearAllData=async function(){
   if(!confirm('Delete ALL records? This cannot be undone.'))return;
-  records=[];nextId=1;saveToStorage();render();
+  try{
+    await fetch(SB_URL+'/rest/v1/auction_records?id=gt.0',{method:'DELETE',headers:SB_HEADERS});
+  }catch(e){console.warn('Clear failed',e);}
+  records=[];nextId=1;render();flashSaved(true);
 };
 window.downloadData=function(){
   if(!records.length){alert('No records to export.');return;}
